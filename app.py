@@ -296,12 +296,7 @@ async def batch_process_invoices(invoice_files: List[UploadFile] = File(...), mo
         processing_complete = True  # Set the flag when processing is complete
         df = pd.DataFrame([logs])
         file_path = "logs_output.xlsx"
-
-        if os.path.exists(file_path):
-            with pd.ExcelWriter(file_path, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-                df.to_excel(writer, index=False, header=False, startrow=writer.sheets["Sheet1"].max_row)
-        else:
-            df.to_excel(file_path, index=False)
+        df.to_excel(file_path, index=False)
         print(f"Data saved to {file_path}")
 
         return JSONResponse(content={"invoice_data": invoice_data_dict})    
