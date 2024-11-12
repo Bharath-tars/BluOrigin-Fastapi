@@ -1,0 +1,12 @@
+fastapi
+fastapi-cors 
+gunicorn
+httpx
+python-dotenv
+uvicorn
+python-multipart
+numpy
+requests
+pandas
+azure-cognitiveservices-vision-computervision
+msrest
