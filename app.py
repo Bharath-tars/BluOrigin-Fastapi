@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -11,34 +11,50 @@ from msrest.authentication import CognitiveServicesCredentials
 from typing import List
 import time
 import random
+import httpx
 import asyncio
 import shutil
 import numpy as np
 import smtplib
 from email.message import EmailMessage
 from datetime import date
-
+from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
+from passlib.context import CryptContext
+import secrets
+import time
+from tempfile import TemporaryDirectory
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+from pydantic import BaseModel
+import uuid
 
 app = FastAPI()
 
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],  # Allows selected origins only
     allow_credentials=True,
     allow_methods=["*"],  # Allows all HTTP methods
     allow_headers=["*"],  # Allows all headers
 )
+
 
 API_KEY = os.environ.get("OPENAI_API_KEY")
 subscription_key = os.environ.get("AZURE_SUBSCRIPTION_KEY")
 endpoint = "https://my-ocr-image.cognitiveservices.azure.com/"
 computervision_client = ComputerVisionClient(endpoint, CognitiveServicesCredentials(subscription_key))
 
+
+
 AVAILABLE_MODELS = {
     'gpt-4': 'gpt-4',
     'gpt-3.5': 'gpt-3.5-turbo'
 }
-DEFAULT_MODEL = 'gpt-4'
+DEFAULT_MODEL = 'gpt-3.5'
 
 start_time_ai = 0
 start_time_ocr = 0
@@ -48,56 +64,62 @@ end_time_ocr = 0
 processed_data = []  # Store processed data to be retrieved by GET request
 processing_complete = False  # Flag to indicate when processing is complete
 
+request_data_store = {}
+
 logs = {}
 ai_money = 0
 
+
+
 def ocr_cost(calls):
-    cost = calls * 0.084076
-    return cost
+    return calls * 0.084076
 
-def calculate_cost(input_tokens, output_tokens):
+async def calculate_cost(input_tokens, output_tokens):
     global ai_money
-    cost = input_tokens * 0.002532 + output_tokens * 0.005064
-    ai_money += cost
+    ai_money += input_tokens * 0.002532 + output_tokens * 0.005064
 
-
-def delay_between_requests():
+async def delay_between_requests():
     delay = random.uniform(1, 5)
     print(f"Delaying for {delay:.2f} seconds to prevent rate limit errors.")
-    time.sleep(delay)
+    await asyncio.sleep(delay)
 
-def get_openai_response(prompt, model_name=DEFAULT_MODEL, retries=3):
-
-    headers = {
+async def get_openai_response(prompt, model_name=DEFAULT_MODEL, retries=3):
+        headers = {
         'Authorization': f'Bearer {API_KEY}',
         'Content-Type': 'application/json',
-    }
-    data = {
-        'model': AVAILABLE_MODELS[model_name],
-        'messages': [{'role': 'user', 'content': prompt}],
-        'max_tokens': 1500,
-        'temperature': 0.5
-    }
-    for attempt in range(retries):
-        try:
-            response = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=data)
-            print(response.json())
-            input_tokens = response.json()['usage']['prompt_tokens']
-            output_tokens = response.json()['usage']['completion_tokens']
-            calculate_cost(input_tokens, output_tokens)
-            response.raise_for_status()
-            return response.json()['choices'][0]['message']['content']
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:  # Rate limit error
-                print("Rate limit exceeded. Stopping the process.")
-                delay_between_requests()
-            else:
-                print(f"HTTP error occurred: {e}")
-                raise
-        except requests.exceptions.RequestException as e:
-            print(f"Error during API request: {e}")
-            raise
-    print("Failed to get response after multiple attempts. Returning None.")
+        }
+        data = {
+            'model': AVAILABLE_MODELS[model_name],
+            'messages': [{'role': 'user', 'content': prompt}],
+            'max_tokens': 1500,
+            'temperature': 0.5
+        }
+        async with httpx.AsyncClient() as client:
+            for attempt in range(retries):
+                try:
+                    print(1)
+                    response = await client.post('https://api.openai.com/v1/chat/completions', 
+                              headers=headers, 
+                              json=data, 
+                              timeout=30)                    
+                    print(response.raise_for_status())
+                    response_json = response.json()
+                    print(response_json)
+                    input_tokens = response_json['usage']['prompt_tokens']
+                    output_tokens = response_json['usage']['completion_tokens']
+                    await calculate_cost(input_tokens, output_tokens)
+                    return response_json['choices'][0]['message']['content']
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 429:  # Rate limit error
+                        print("Rate limit exceeded. Retrying after delay...")
+                        await delay_between_requests()
+                    else:
+                        print(f"HTTP error occurred: {e}")
+                        raise
+                except httpx.RequestError as e:
+                    print(f"Error during API request: {e}")
+                    raise
+        print("Failed to get response after multiple attempts. Returning None.")
 
 def sno():
     with open('variable', 'r') as lt:
@@ -110,15 +132,16 @@ def sno():
             sno = str(code) + str(no)
     return sno
 
-def process_invoicing(invoice_texts, model_name=DEFAULT_MODEL):
+async def process_invoicing(invoice_texts, model_name=DEFAULT_MODEL):
     all_data = []
     if model_name not in AVAILABLE_MODELS:
         print(f"Error: Model '{model_name}' is not available. Using default model '{DEFAULT_MODEL}' instead.")
         model_name = DEFAULT_MODEL
     responses = []
     no_of_invoices = len(invoice_texts)
+    print("Abou to process")
     cost_ocr = ocr_cost(no_of_invoices)
-    logs["ocr_cost"] = cost_ocr
+    logs["ocr_cost"] = cost_ocr 
     all_ids = []
     for ocr_output in invoice_texts:
         # Print OCR text for debugging purposes
@@ -158,7 +181,7 @@ def process_invoicing(invoice_texts, model_name=DEFAULT_MODEL):
         - Avoid confusing cumulative quantities with rates. Quantities are usually numeric values with units like "CUM", "KG", or "L". Rates are monetary values with currency symbols like "₹" or "$".
         - If any fields are not found, return "None" as the value.
         """
-        response_content = get_openai_response(prompt, model_name)
+        response_content = await get_openai_response(prompt, model_name)
         print(response_content)
         print(len(response_content))
         if not response_content:
@@ -219,7 +242,7 @@ def process_invoicing(invoice_texts, model_name=DEFAULT_MODEL):
     return pd.DataFrame(all_data)
 
 # Function to extract text from image using Azure OCR
-def extract_text_from_image(image_path, retries=3):
+async def extract_text_from_image(image_path, retries=3):
     for attempt in range(retries):
         try:
             with open(image_path, "rb") as image_stream:
@@ -228,13 +251,13 @@ def extract_text_from_image(image_path, retries=3):
             read_operation_location = read_response.headers["Operation-Location"]
             operation_id = read_operation_location.split("/")[-1]
             
-            delay_between_requests()
+            await delay_between_requests()
 
             while True:
                 read_result = computervision_client.get_read_result(operation_id)
                 if read_result.status not in ['notStarted', 'running']:
                     break
-                time.sleep(1)
+                await asyncio.sleep(1)
 
             full_text = ""
 
@@ -257,8 +280,12 @@ def extract_text_from_image(image_path, retries=3):
 async def batch_process_invoices(invoice_files: List[UploadFile] = File(...), model_name: str = DEFAULT_MODEL):
     global processing_complete
     logs["time stamp"] = date.today().strftime("%Y-%m-%d")
+    request_id = str(uuid.uuid4())
+    request_data_store[request_id] = {"status": "processing", "data": None}
     processing_complete = False  # Reset the flag at the start of processing
     file_paths = []
+
+
     for file in invoice_files:
         filename = f"temp_{file.filename}"
         with open(filename, "wb") as buffer:
@@ -276,7 +303,7 @@ async def batch_process_invoices(invoice_files: List[UploadFile] = File(...), mo
 
         ai_start_time = time.time()
         print("inside")
-        results = process_invoicing(ocr_outputs,model_name=model_name)
+        results = await process_invoicing(ocr_outputs,model_name=model_name)
         print("outside")
         ai_end_time = time.time()
         total_ai_time = ai_end_time - ai_start_time
@@ -294,13 +321,22 @@ async def batch_process_invoices(invoice_files: List[UploadFile] = File(...), mo
         invoice_data_dict = results.replace({np.nan: None}).to_dict(orient='records')
         processed_data.extend(invoice_data_dict)  # Store processed data for GET request
         processing_complete = True  # Set the flag when processing is complete
+        request_data_store[request_id]["status"] = "completed"
+        request_data_store[request_id]["data"] = invoice_data_dict
         df = pd.DataFrame([logs])
         file_path = "logs_output.xlsx"
-        df.to_excel(file_path, index=False)
+
+        if os.path.exists(file_path):
+            with pd.ExcelWriter(file_path, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
+                df.to_excel(writer, index=False, header=False, startrow=writer.sheets["Sheet1"].max_row)
+        else:
+            df.to_excel(file_path, index=False)
         print(f"Data saved to {file_path}")
 
-        return JSONResponse(content={"invoice_data": invoice_data_dict})    
+        return JSONResponse(content={"request_id": request_id, "invoice_data": invoice_data_dict})    
     except Exception as e:
+        request_data_store[request_id]["status"] = "error"
+        request_data_store[request_id]["error"] = str(e)
         return HTTPException(status_code=500, detail=str(e))
     finally:
         for path in file_paths:
@@ -308,7 +344,7 @@ async def batch_process_invoices(invoice_files: List[UploadFile] = File(...), mo
 
 async def process_image(file_path: str):
     start_time = time.time()
-    ocr_text = extract_text_from_image(file_path)
+    ocr_text = await extract_text_from_image(file_path)
     print(f"OCR extraction took {time.time() - start_time:.2f} seconds")
     return ocr_text
 
@@ -323,9 +359,22 @@ async def get_processed_invoices():
     except Exception as e:
         return HTTPException(status_code=500, detail=str(e))
     
+@app.get("/get_processed_invoices/{request_id}")
+async def get_processed_invoices(request_id: str):
+    try:
+        request_data = request_data_store.get(request_id)
+        if not request_data:
+            raise HTTPException(status_code=404, detail="Request not found")
+        if request_data["status"] == "processing":
+            raise HTTPException(status_code=202, detail="Processing not complete")
+        if request_data["status"] == "error":
+            raise HTTPException(status_code=500, detail=request_data["error"])
+        return {"invoice_data": request_data["data"]}       
+    except Exception as e:
+        return HTTPException(status_code=500, detail=str(e))
 
 @app.post("/send_email")
-async def send_email( email_list: str = Form(...), file: UploadFile = File(...),):
+async def send_email( email_list: str = Form(...), file: UploadFile = File(...)):
     EMAIL_ADDRESS = "bharathworks2u@gmail.com"
     EMAIL_PASSWORD = "yiyiqhgtovmjoxeq"
     emails = email_list.split(',')
@@ -349,4 +398,4 @@ async def send_email( email_list: str = Form(...), file: UploadFile = File(...),
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to the BluOrgin AI's Invoice Application Processor! add /upload-invoice to the URL to upload an invoice image."}
+    return {"message": "Hey!! Welcome to the BluOrgin AI's Invoice Application Processor! add /docs to proceed"}
