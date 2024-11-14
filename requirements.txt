@@ -11,3 +11,8 @@ openpyxl
 pandas
 azure-cognitiveservices-vision-computervision
 msrest
+smtplib
+pydantic
+passlib
+python-jose
+uuid
